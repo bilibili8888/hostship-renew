@@ -1,8 +1,10 @@
+
 name: host-ship 自动续期
 
-# 面板续期周期 = 7 天；脚本自己守门（剩余 > HS_MIN_DAYS 天就静默跳过），
-# 所以这里多发几个点也没关系。GitHub 原生 schedule 经常丢 tick，
-# 真正的定时靠 cron-job.org 外部触发 workflow_dispatch（见 README）。
+# 面板续期周期 = 7 天
+# 剩余天数大于 HS_MIN_DAYS 时静默跳过
+# GitHub Actions 定时 + cron-job.org 外部触发
+
 on:
   schedule:
     - cron: '17 3,15 * * *'
@@ -21,6 +23,11 @@ on:
         type: string
         default: ''
 
+# 自动续期 + 删除运行记录需要的权限
+permissions:
+  contents: write
+  actions: write
+
 concurrency:
   group: hostship-renew
   cancel-in-progress: false
@@ -29,6 +36,7 @@ jobs:
   renew:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+
     steps:
       - uses: actions/checkout@v4
 
@@ -44,7 +52,7 @@ jobs:
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
           TG_THREAD_ID: ${{ secrets.TG_THREAD_ID }}
           HS_MIN_DAYS: ${{ github.event.inputs.min_days != '' && github.event.inputs.min_days || '10' }}
-          HS_TOPUP_DAYS: '30'
+          HS_TOPUP_DAYS: '14'
           HS_MAX_ROUNDS: '3'
           HS_SMOKE: ${{ github.event.inputs.smoke == 'true' && '1' || '' }}
           HS_NOTIFY_TEST: ${{ github.event.inputs.notify_test == 'true' && '1' || '' }}
@@ -53,3 +61,49 @@ jobs:
       - name: 失败时提示
         if: failure()
         run: echo "::warning::续期流程失败，看上面的日志"
+
+      # 添加自动续命步骤
+      - name: ❤️ Keepalive Workflow
+        if: always()
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+
+          git commit --allow-empty -m "Chore: Keep-alive [skip ci]"
+
+          git push origin "HEAD:${GITHUB_REF_NAME}" || echo "No changes to push"
+
+      # 清理旧的工作流运行记录
+      - name: 🧹 清理旧的工作流运行记录
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          runs=$(gh run list \
+            --workflow="${{ github.workflow }}" \
+            --branch="$GITHUB_REF_NAME" \
+            --limit=100 \
+            --json databaseId,status \
+            --jq '.[] | select(.status == "completed") | .databaseId') || {
+              echo "无法获取运行记录，跳过清理"
+              exit 0
+            }
+
+          count=0
+
+          while IFS= read -r run_id; do
+            [ -n "$run_id" ] || continue
+
+            if [ "$run_id" = "$GITHUB_RUN_ID" ]; then
+              continue
+            fi
+
+            count=$((count + 1))
+
+            if [ "$count" -gt 1 ]; then
+              echo "删除运行记录: $run_id"
+              gh run delete "$run_id" || echo "删除失败，跳过"
+            else
+              echo "保留最近一次已完成记录: $run_id"
+            fi
+          done <<< "$runs"
